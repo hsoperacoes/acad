@@ -619,16 +619,36 @@
     return "R$ " + n.toFixed(2).replace(".", ",");
   }
 
+  // ✅ Timeout leve pra não ficar “pendurado”
+  function fetchWithTimeout(url, options={}, timeoutMs=15000){
+    const controller = new AbortController();
+    const id = setTimeout(() => controller.abort(), timeoutMs);
+    return fetch(url, { ...options, signal: controller.signal })
+      .finally(() => clearTimeout(id));
+  }
+
+  // ================= API (CORRIGIDA: SEM PRE-FLIGHT) =================
   async function api(action, payload={}){
     const body = { action, ...payload };
     if (state.token) body.token = state.token;
 
-    const res = await fetch(SCRIPT_URL, {
-      method:"POST",
-      headers:{ "Content-Type":"application/json" },
+    const res = await fetchWithTimeout(SCRIPT_URL, {
+      method: "POST",
+      cache: "no-store",
+
+      // ✅ ESSA É A CORREÇÃO DO "FAILED TO FETCH" NO GITHUB PAGES
+      // Não usar application/json, senão o browser dispara OPTIONS (preflight) e o Apps Script bloqueia.
+      headers: { "Content-Type": "text/plain;charset=utf-8" },
+
       body: JSON.stringify(body)
-    });
-    const data = await res.json();
+    }, 15000);
+
+    // Se o Apps Script caiu/expirou, isso evita erro feio
+    const text = await res.text();
+    let data;
+    try { data = JSON.parse(text); }
+    catch { throw new Error("Resposta inválida do servidor (deploy/AppWeb)."); }
+
     if (!data.ok){
       throw new Error(data.error || "Erro desconhecido");
     }
@@ -721,9 +741,6 @@
     $("userStreak").textContent = String(d.streak || 0);
     $("userWeek").textContent = `${d.weeklyCount || 0}/${d.weeklyGoal || 0}`;
 
-    // Mensalidade (alerta 7 dias / vencida / pago)
-    // Aqui a UI decide. O cálculo "avisar todos os dias faltando 7" você já tem no seu script de alerta,
-    // mas pro painel a gente mostra sempre quando faltam <=7 e não pago.
     const paid = !!d.paid;
     const due = d.dueDate;
     const box = $("paymentBox");
@@ -749,11 +766,9 @@
       }
     }
 
-    // Inatividade
     $("inactivityBox").classList.toggle("hidden", !d.inactivityAlert);
     $("inactivityText").textContent = d.inactivityText || "";
 
-    // Sequência (com highlight do índice atual)
     const seq = Array.isArray(d.sequence) ? d.sequence : [];
     const current = Number(d.currentIndex || 0);
     const list = $("sequenceList");
@@ -775,7 +790,6 @@
       });
     }
 
-    // Recados
     const msgs = Array.isArray(d.messages) ? d.messages : [];
     const msgList = $("msgList");
     if (!msgs.length){
@@ -789,17 +803,14 @@
       `).join("");
     }
 
-    // Último treino mesmo módulo
     const last = d.lastWorkoutSameModule;
     $("lastSameModule").textContent = last && last.durationMin != null
       ? `${last.durationMin} min em ${formatBR(last.dateISO)}`
       : "Sem treino anterior registrado nesse módulo.";
 
-    // Status de hoje + botões
     const wt = d.workoutToday || {};
     renderTodayStatus(wt);
 
-    // Se tem treino iniciado hoje, liga timer
     if (wt.started && wt.startIso && !wt.finished){
       $("timerHint").textContent = "Treino em andamento...";
       startTimerFromISO(wt.startIso);
@@ -824,7 +835,7 @@
       $("timerHint").textContent = "Faça check-in para iniciar";
     } else if (started && !finished){
       text = "Hoje: check-in feito. Faça check-out ao terminar.";
-      $("btnCheckin").disabled = true; // trava 1 por dia
+      $("btnCheckin").disabled = true;
       $("btnCheckout").disabled = false;
     } else {
       text = `Hoje: treino concluído ✅ (${wt.durationMin || 0} min)`;
@@ -1005,7 +1016,6 @@
     setChip("Desconectado", false);
     $("dayOfWeek").textContent = dayNamePT();
 
-    // auto-recover session
     if (state.token){
       try{
         if (state.role === "master"){
@@ -1022,7 +1032,6 @@
         }
         return;
       }catch(e){
-        // sessão expirada
         clearSession();
         show("viewLogin");
         toast("Sessão expirada. Faça login novamente.");
